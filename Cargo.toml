@@ -1,0 +1,13 @@
+[package]
+name = "adyar-rs"
+version = "0.1.0"
+authors = ["Sriram P C <sriram.pc@gmail.com>"]
+edition = "2018"
+
+
+[dependencies]
+num = "0.2"
+rand = "0.7"
+clap = "~2.33"
+bio = "*"
+sufsort-rs = { path = "ext/sufsort-rs", version = "0.1.0" }

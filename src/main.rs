@@ -3,6 +3,9 @@ extern crate bio;
 extern crate num;
 extern crate clap;
 
+use std::io::prelude::*;
+use std::fs::File;
+
 use sufsort_rs::sufsort;
 use sufsort_rs::lcp;
 use sufsort_rs::rmq;
@@ -20,6 +23,7 @@ const SECOND_DELIMITER_U8: u8 = SECOND_DELIMITER as u8;
 pub struct RunArgs {
     pub k: usize,
     pub file_name: String,
+    pub out_file: String,
 }
 
 pub struct GST<'s, T> where 
@@ -107,7 +111,7 @@ pub fn verify_acsk<T>(gst: &GST<T>, lcpk_length: &Vec<T>, match_pos: &Vec<T>,
 //
 // finding matches for k = 0
 //
-pub fn find_matches<T>(gst: &GST<T>) -> LCPK<T> where 
+pub fn find_exact_matches<T>(gst: &GST<T>) -> LCPK<T> where 
   T: std::marker::Copy + num::Integer + num::FromPrimitive + std::fmt::Debug {
     
     let n = gst.concat_txt.len();
@@ -422,7 +426,7 @@ where
 	}
 	// to verify phase 1 of adyar algorithm
 	// verify_acsk(gst, &lcpk.lcpk_length, &max_match_adyar, args.k);
-    println!( "ACSK PHASE 1 {}", compute_distance(gst, &lcpk));
+    // println!( "ACSK PHASE 1 {}", compute_distance(gst, &lcpk));
     //return 0.0;
 
     // Phase 2:
@@ -466,10 +470,12 @@ pub fn compute_distance<T>(gst: &GST<T>, lcpk: &LCPK<T>) -> f64
 	avg_s2 = avg_s2/s2.len() as f64;
 
 	let d_acs: f64 =
-     ((( (s1.len()) as f64).log10()/(2.0*avg_s2)) + ((s2.len() as f64).log10()/(2.0*avg_s1))) - 
-        ((((s1.len()) as f64).log10()/(((s1.len())  as f64))) + ((s2.len() as f64).log10()/(s2.len() as f64)));
-	//std::cout << "ACS for k= " << args.k << " : " << d_acs << std::endl;
-	// args.d_vector.push_back(d_acs);
+     (
+         ((s1.len() as f64).log10()/(2.0 * avg_s2)) + ((s2.len() as f64).log10()/(2.0*avg_s1))
+        ) - 
+     (
+         ((s1.len() as f64).log10()/(s1.len()  as f64)) + ((s2.len() as f64).log10()/(s2.len() as f64))
+        );
     d_acs
 }
 
@@ -484,7 +490,6 @@ pub fn compute_acsk<T>(args: & RunArgs, gst: & GST<T>, lcpk: &mut LCPK<T>) -> f6
 	// to calculate and print acsk based in k-macs
 	let max_match_kmacs: Vec<T> = compute_lcpk_kmacs(args, gst, lcpk);
 
-
 	// to verify k-macs algorithm
 	//verify_acsk(gst, &lcpk.lcpk_length, &max_match, args.k);
     let _acs_kmacs = compute_distance(gst, &lcpk);
@@ -498,15 +503,89 @@ pub fn compute_acsk<T>(args: & RunArgs, gst: & GST<T>, lcpk: &mut LCPK<T>) -> f6
 }
 
 
-fn run_adyar(rargs: RunArgs) {
+pub fn fill_dist_matrix(nseq: usize, pairwise_dcs:& Vec<f64>) -> Vec<Vec<f64>> {
+	let mut d_matrix: Vec<Vec<f64>> = vec![vec![0.0; nseq]; nseq];
+	//populate d_matrix using d_vector
+	let mut idx: usize = 0;
+
+	for i in 0..nseq {
+		for j in (i+1)..nseq {
+			let value = pairwise_dcs[idx];
+			//std::cout << value << std::endl;
+			d_matrix[i][j] = value;
+			d_matrix[j][i] = value;
+			idx += 1;
+		}
+	}
+    d_matrix
+}
+
+pub fn write_dist_matrix(args : &RunArgs,
+                         d_matrix: & Vec<Vec<f64>>,
+                         title: &Vec<String>) -> std::io::Result<()> {
+    let mut outf = File::create(&args.out_file)?;
+    //let mut writer = BufWriter::new(outf);
+    let nseq: usize = d_matrix.len();
+    let mut mat_string = String::new();
+    mat_string.push_str(&nseq.to_string());
+    mat_string.push_str("\n");
+	//file_object << nReads << std::endl;
+
+	for i in 0..nseq {
+		let name = &title[i];
+		// if(name.len() > 10)
+		// 	name = name.(0,10);
+        let nlen = if name.len() > 10 {
+            let mut txstr = name.to_string();
+            txstr.truncate(10);
+            mat_string.push_str(&txstr);
+            txstr.len()
+        } else {
+            mat_string.push_str(name);
+            name.len()
+        };
+        for _j in 0..(14-nlen) {
+            mat_string.push(' ');
+        }
+		// file_object << std::setw(14) << std::left << name;
+        for j in 0..nseq {
+			let kdxy = d_matrix[i][j];
+			// file_object << kdxy << ((j==nReads-1)?"":" ");
+            mat_string.push_str(&kdxy.to_string());
+            if j < nseq - 1 {
+                mat_string.push(' ');
+            }
+		}
+		// file_object << std::endl;
+        mat_string.push('\n');
+	}
+
+    outf.write_all(mat_string.as_bytes())?;
+    Ok(())
+}
+
+pub fn write_output(args: &RunArgs, titles: &Vec<String>,
+                    pairwise_dcs: &Vec<f64>) -> std::io::Result<()> {
+    let d_matrix = fill_dist_matrix(titles.len(), pairwise_dcs);
+    write_dist_matrix(args, &d_matrix, titles)?;
+    Ok(())
+}
+
+
+fn run_adyar(rargs: RunArgs) -> std::io::Result<()> {
+
     let reader = fasta::Reader::from_file(rargs.file_name.as_str()).unwrap();
     let rcds: Vec<Record> = reader.records().map(|x| x.unwrap()).collect();
     println!("No. of Sequences {}", rcds.len());
     let nseq = rcds.len();
 
+    let now = std::time::Instant::now();
+
+    let mut vidx : usize = 0;
+    let mut pairwise_dcs: Vec<f64> = vec![0.0; (nseq*(nseq-1))/2];
     for x in 0..nseq{
+        let seqx = rcds[x].seq();
         for y in (x+1)..nseq {
-            let seqx = rcds[x].seq();
             let seqy = rcds[y].seq();
             let mut tvec: Vec<u8> = seqx.to_vec();
             let eos_first = tvec.len();
@@ -527,25 +606,39 @@ fn run_adyar(rargs: RunArgs) {
                 gsa: &gsa, gisa: &gisa, glcp: &glcp, grmq: &grmq
             };
 
-            println!("First Len {}, Second Len {}, First EOS {}, Second EOS {}", 
-                        gst.first_seq.len(), gst.second_seq.len(),
-                        gst.first_eos, gst.second_eos);
+            // println!("First Len {}, Second Len {}, First EOS {}, Second EOS {}", 
+            //             gst.first_seq.len(), gst.second_seq.len(),
+            //             gst.first_eos, gst.second_eos);
 
-            let mut lcpk = find_matches(&gst);
+            let mut lcpk = find_exact_matches(&gst);
             // println!("Matches {:?}", lcpk.match_length);
             let acsk = compute_acsk(&rargs, &gst, &mut lcpk);
 
-            println!("{}", acsk);
+            // println!("{}", acsk);
+
+            pairwise_dcs[vidx] = acsk;
+            vidx += 1;
         }
     // }
     }
-
+    println!("Runtime for computing ACSK {} ms", now.elapsed().as_millis());
+    let mut titles: Vec<String> = Vec::with_capacity(nseq);
+    for x in 0..nseq {
+        titles.push(String::from(rcds[x].id()))
+    }
+    write_output(&rargs, &titles, &pairwise_dcs)?;
+    Ok(())
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     fn is_integer(v: String) -> Result<(), String> {
         if v.parse::<usize>().is_ok() { return Ok(()); }
         Err(String::from("The value is not valid integer"))
+    }
+    fn is_writable(v: String) -> Result<(), String> {
+        let file = File::create(&v);  
+        if file.is_ok() { return Ok(()); }
+        Err(String::from("Can't open the output file"))
     }
     let matches = App::new("Adyar : Heuristic")
                             .version("0.1.0")
@@ -563,13 +656,26 @@ fn main() {
                                .default_value("1")
                                .help("No. of Mismatches")
                                .takes_value(true))
+                            .arg(Arg::with_name("out_file")
+                               .short("o")
+                               .long("out_file")
+                               .value_name("OUT_FILE")
+                               .required(true)
+                               .validator(is_writable)
+                               .help("No. of Mismatches")
+                               .takes_value(true))
                           .get_matches();
 
     
     let rargs: RunArgs = RunArgs {
         file_name: String::from(matches.value_of("INPUT").unwrap()),
         k: matches.value_of("mismatches").unwrap().parse::<usize>().unwrap(),
+        out_file: String::from(matches.value_of("out_file").unwrap())
     };
-    println!("Using input args: INPUT = {}, K = {} ", rargs.file_name, rargs.k);
-    run_adyar(rargs);
+    println!("Using input args: INPUT = {}, K = {}, Output = {} ", rargs.file_name,
+                 rargs.k, rargs.out_file);
+    let tnow = std::time::Instant::now();
+    run_adyar(rargs)?;
+    println!("Total run time inc. IO {} ms", tnow.elapsed().as_millis());
+    Ok(())
 }

@@ -36,7 +36,7 @@ pub struct GST<'s, T> where
     pub gsa: &'s sufsort::SA<'s, T>,
     pub gisa: &'s Vec<T>,
     pub glcp: &'s Vec<T>,
-    pub grmq: &'s rmq::RMQ<'s, T, usize>,
+    pub grmq: Option<&'s rmq::RMQ<'s, T, usize>>,
 }
 
 pub struct LCPK<T> where 
@@ -411,7 +411,8 @@ where
 			if mismatch_position_fwd[j] == n || mismatch_position_bwd[j] == n {
 				continue;
 			}
-            assert!(mismatch_position_fwd[j] > mismatch_position_bwd[j]);
+            //assert!(mismatch_position_fwd[j] > mismatch_position_bwd[j]);
+            if mismatch_position_fwd[j] < mismatch_position_bwd[j] + args.k { continue };
 
             let bw_pos = gst.gisa[mismatch_position_bwd[j]].to_usize().unwrap();
             let lcp_len = lcpk.lcpk_length[bw_pos].to_usize().unwrap();
@@ -426,7 +427,7 @@ where
 	}
 	// to verify phase 1 of adyar algorithm
 	// verify_acsk(gst, &lcpk.lcpk_length, &max_match_adyar, args.k);
-    // println!( "ACSK PHASE 1 {}", compute_distance(gst, &lcpk));
+    println!( "ACSK PHASE 1 {}", compute_distance(gst, &lcpk));
     //return 0.0;
 
     // Phase 2:
@@ -452,10 +453,10 @@ pub fn compute_distance<T>(gst: &GST<T>, lcpk: &LCPK<T>) -> f64
         std::fmt::Debug {
 	let mut s1: Vec<usize> = vec![0; gst.first_seq.len()];
     let mut s2: Vec<usize> = vec![0; gst.second_seq.len()];
-	for i in 3..gst.gsa.sarray.len() {
+	for i in 2..gst.gsa.sarray.len() {
         let saidx = gst.gsa.sarray[i].to_usize().unwrap();
 		if saidx > gst.first_eos {
-			s2[saidx-gst.first_eos] = lcpk.lcpk_length[i].to_usize().unwrap();
+			s2[saidx-gst.first_eos-1] = lcpk.lcpk_length[i].to_usize().unwrap();
 		}
         if saidx < gst.first_seq.len() {
 			s1[saidx] = lcpk.lcpk_length[i].to_usize().unwrap();
@@ -489,6 +490,8 @@ pub fn compute_acsk<T>(args: & RunArgs, gst: & GST<T>, lcpk: &mut LCPK<T>) -> f6
 	// lcpk based on k-macs's heuristic
 	// to calculate and print acsk based in k-macs
 	let max_match_kmacs: Vec<T> = compute_lcpk_kmacs(args, gst, lcpk);
+    println!("ACSK KMACS COMPLETE");
+    println!( "ACSK KMACS {}", compute_distance(gst, &lcpk));
 
 	// to verify k-macs algorithm
 	//verify_acsk(gst, &lcpk.lcpk_length, &max_match, args.k);
@@ -598,12 +601,13 @@ fn run_adyar(rargs: RunArgs) -> std::io::Result<()> {
             let gsa = sufsort::SA::<i32>::new(&tvec);
             let gisa = sufsort::construct_isa(&gsa.sarray);
             let glcp = lcp::construct_lcp_from_sa(gsa.txt, &gsa.sarray, &gisa);
-            let grmq = rmq::RMQ::<i32, usize>::new(&glcp);
+            //let grmq = rmq::RMQ::<i32, usize>::new(&glcp);
+            println!("Construction Complete");
 
             let gst: GST<i32> = GST::<i32> {    
                 first_seq: &seqx, second_seq: &seqy, concat_txt: &tvec,
                 first_eos: eos_first, second_eos: eos_second,
-                gsa: &gsa, gisa: &gisa, glcp: &glcp, grmq: &grmq
+                gsa: &gsa, gisa: &gisa, glcp: &glcp, grmq: None // &grmq
             };
 
             // println!("First Len {}, Second Len {}, First EOS {}, Second EOS {}", 
@@ -611,10 +615,10 @@ fn run_adyar(rargs: RunArgs) -> std::io::Result<()> {
             //             gst.first_eos, gst.second_eos);
 
             let mut lcpk = find_exact_matches(&gst);
-            // println!("Matches {:?}", lcpk.match_length);
+            println!("Matches Complete");
             let acsk = compute_acsk(&rargs, &gst, &mut lcpk);
 
-            // println!("{}", acsk);
+            println!("{}", acsk);
 
             pairwise_dcs[vidx] = acsk;
             vidx += 1;

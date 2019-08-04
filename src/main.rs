@@ -15,7 +15,7 @@ use bio::io::fasta::Record;
 
 use clap::{App, Arg};
 
-const FIRST_DELIMITER: char = '@';
+const FIRST_DELIMITER: char = '#';
 const SECOND_DELIMITER: char = '$';
 const FIRST_DELIMITER_U8: u8 = FIRST_DELIMITER as u8;
 const SECOND_DELIMITER_U8: u8 = SECOND_DELIMITER as u8;
@@ -24,6 +24,7 @@ pub struct RunArgs {
     pub k: usize,
     pub file_name: String,
     pub out_file: String,
+    pub use_rmq: bool,
 }
 
 pub struct GST<'s, T> where 
@@ -36,7 +37,7 @@ pub struct GST<'s, T> where
     pub gsa: &'s sufsort::SA<'s, T>,
     pub gisa: &'s Vec<T>,
     pub glcp: &'s Vec<T>,
-    pub grmq: Option<&'s rmq::RMQ<'s, T, usize>>,
+    pub grmq: &'s Option<rmq::RMQ<'s, T, usize>>,
 }
 
 pub struct LCPK<T> where 
@@ -54,6 +55,23 @@ pub enum MatchDirection{
     MatchRight
 }
 
+
+
+pub fn small_hist<T>(invec: & Vec<T>)
+    where T: num::Integer + num::FromPrimitive + num::ToPrimitive{
+    let hmax = 8;
+    let mut shist : Vec<usize> = vec![0; hmax];
+    for i in 0..invec.len() {
+        if invec[i].to_usize().unwrap() < hmax {
+            shist[invec[i].to_usize().unwrap()] += 1;
+        } 
+    }
+
+    println!("Small Histogram");
+    for i in 0..shist.len() {
+        println!("{} : {}", i, shist[i]);
+    }
+}
 
 
 pub fn verify_acsk_at<T>(gst: &GST<T>, pos: T, match_pos: T,  max_length: T,
@@ -124,10 +142,10 @@ pub fn find_exact_matches<T>(gst: &GST<T>) -> LCPK<T> where
     let mut last_match_saidx: T = T::zero();
 
     // Scan left to right
-    for i in 2..(n-1) { // first two entries are delimiters! 
+    for i in 0..(n-1) { // first two entries are delimiters! 
         if (gst.gsa.sarray[i] > eos_first && gst.gsa.sarray[i+1] > eos_first) || 
             (gst.gsa.sarray[i] < eos_first && gst.gsa.sarray[i+1] < eos_first) {
-            if gst.glcp[i+1] <= min {
+            if gst.glcp[i+1] < min {
                 min = gst.glcp[i+1];
             }
         } else {
@@ -139,10 +157,10 @@ pub fn find_exact_matches<T>(gst: &GST<T>) -> LCPK<T> where
     }
 
     min = T::zero(); last_match_saidx = T::zero();
-    for i in (3..n).rev()  {
+    for i in (1..n).rev()  {
         if (gst.gsa.sarray[i] > eos_first && gst.gsa.sarray[i-1] > eos_first) ||
             (gst.gsa.sarray[i] < eos_first && gst.gsa.sarray[i-1] < eos_first) {
-            if gst.glcp[i] <= min {
+            if gst.glcp[i] < min {
                 min = gst.glcp[i];
             }
         } else {
@@ -160,6 +178,7 @@ pub fn find_exact_matches<T>(gst: &GST<T>) -> LCPK<T> where
         }
     }
 
+
     LCPK::<T>{
         match_length: match_length,
         left_match: left_match,
@@ -171,28 +190,32 @@ pub fn find_exact_matches<T>(gst: &GST<T>) -> LCPK<T> where
 pub fn forward_match(concat_txt: &[u8], 
                      pos1: usize, pos2: usize,
                      eos_first: usize, eos_second: usize,  
-                     k: usize) -> usize {
+                     k: usize) -> (usize, usize) {
     let mut lcp: usize = 0;
+    let mut lcpkm1: usize = 0;
     let mut rk : i32 = k as i32;
     let mut p1 = pos1;
     let mut p2 = pos2;
 
     while rk >= 0 && 
-            p1 < eos_first && p2 < eos_second &&
-            concat_txt[p1] != FIRST_DELIMITER_U8 &&
-            concat_txt[p2] != SECOND_DELIMITER_U8  {
+            p1 < eos_first && p2 < eos_second  {
         if concat_txt[p1] == concat_txt[p2] {
             lcp += 1; 
         } else {
             rk -= 1;
+            if rk == 0 {
+                lcpkm1 = lcp;
+            }
         }
         p1 += 1; p2 += 1;
     }
-    lcp
+    (lcp, lcpkm1)
 }
 
 pub fn match_with_second<T>(args: & RunArgs, gst: & GST<T>,
-                            lcpk: &LCPK<T>, i: usize) -> (MatchDirection, usize, usize)
+                            lcpk: &LCPK<T>, i: usize) -> 
+                (MatchDirection, usize, usize,
+                 MatchDirection, usize, usize, usize)
     where
     T: std::marker::Copy + 
          num::Integer + num::FromPrimitive + num::ToPrimitive +
@@ -202,30 +225,39 @@ pub fn match_with_second<T>(args: & RunArgs, gst: & GST<T>,
     let mut pos2: usize = 0;
     let mut maxl: usize = 0;
     let mut flag: MatchDirection = MatchDirection::MatchNone;
-    let mut lcp: usize;
+    let mut pos2km: usize = 0;
+    let mut maxlkm: usize = 0;
+    let mut flagkm: MatchDirection = MatchDirection::MatchNone;
+    let mut maxp: usize = 0;
     if lcpk.left_match[i] > T::zero() && pos1 < gst.first_eos {
         let mut p = lcpk.left_match[i].to_usize().unwrap();
         while gst.glcp[p+1] >= lcpk.match_length[i] && p > 0 { // TODO: should this be 2?
             if gst.gsa.sarray[p].to_usize().unwrap() > gst.first_eos {
-                lcp = forward_match(gst.concat_txt,
-                                    pos1,
-                                    (gst.gsa.sarray[p] +
-                                     lcpk.match_length[i]).to_usize().unwrap(),
-                                    gst.first_eos, gst.second_eos, args.k);
+                let (lcp, lcpkm) = forward_match(gst.concat_txt,
+                                            pos1,
+                                            (gst.gsa.sarray[p] +
+                                            lcpk.match_length[i]).to_usize().unwrap(),
+                                            gst.first_eos, gst.second_eos, args.k);
                 if lcp > maxl {
                     maxl = lcp;
                     pos2 = p;
                     flag = MatchDirection::MatchLeft;
                 }
+                if lcpkm > maxlkm {
+                    maxlkm = lcpkm;
+                    pos2km = p;
+                    flagkm = MatchDirection::MatchLeft;
+                }
             }
             p -= 1;
         }
+        maxp = lcpk.left_match[i].to_usize().unwrap() - p;
     }
     if lcpk.right_match[i] > T::zero() && pos1 < gst.first_eos {
         let mut p = lcpk.right_match[i].to_usize().unwrap();
         while gst.glcp[p] >= lcpk.match_length[i] && p < gst.second_eos {
             if gst.gsa.sarray[p].to_usize().unwrap() > gst.first_eos {
-                lcp = forward_match(gst.concat_txt,
+                let (lcp, lcpkm) = forward_match(gst.concat_txt,
                                     pos1,
                                     (gst.gsa.sarray[p] + 
                                         lcpk.match_length[i]).to_usize().unwrap(),
@@ -235,15 +267,23 @@ pub fn match_with_second<T>(args: & RunArgs, gst: & GST<T>,
                     pos2 = p;
                     flag = MatchDirection::MatchRight;
                 }
+                if lcpkm > maxlkm {
+                    maxlkm = lcpkm;
+                    pos2km = p;
+                    flagkm = MatchDirection::MatchRight;
+                }
             }
             p += 1;
         }
+        maxp = std::cmp::max(maxp, p - lcpk.right_match[i].to_usize().unwrap());
     }
-    (flag, pos2, maxl)
+    (flag, pos2, maxl, flagkm, pos2km, maxlkm, maxp)
 }
 
 pub fn match_with_first<T>(args: & RunArgs, gst: & GST<T>,
-                           lcpk: &LCPK<T>, i: usize) -> (MatchDirection, usize, usize)
+                           lcpk: &LCPK<T>, i: usize) ->
+                (MatchDirection, usize, usize,
+                 MatchDirection, usize, usize, usize)
     where
     T: std::marker::Copy + 
          num::Integer + num::FromPrimitive + num::ToPrimitive +
@@ -254,13 +294,16 @@ pub fn match_with_first<T>(args: & RunArgs, gst: & GST<T>,
     let mut pos2: usize = gst.second_eos;
     let mut maxl: usize = 0;
     let mut flag: MatchDirection = MatchDirection::MatchNone;
-    let mut p: usize; let mut lcp: usize;
+    let mut pos2km: usize = 0;
+    let mut maxlkm: usize = 0;
+    let mut flagkm: MatchDirection = MatchDirection::MatchNone;
+    let mut maxp: usize = 0; 
 
     if lcpk.left_match[i] > T::zero() && pos1 < gst.second_eos {
-        p = lcpk.left_match[i].to_usize().unwrap();
+        let mut p = lcpk.left_match[i].to_usize().unwrap();
         while gst.glcp[p+1] >= lcpk.match_length[i] && p > 0 {
             if gst.gsa.sarray[p].to_usize().unwrap() < gst.first_eos {
-                lcp = forward_match(gst.concat_txt,
+                let (lcp, lcpkm) = forward_match(gst.concat_txt,
                                     (gst.gsa.sarray[p]+
                                         lcpk.match_length[i]).to_usize().unwrap(), 
                                     pos1,
@@ -270,15 +313,21 @@ pub fn match_with_first<T>(args: & RunArgs, gst: & GST<T>,
                     pos2 = p;
                     flag = MatchDirection::MatchLeft;
                 }
+                if lcpkm > maxlkm {
+                    maxlkm = lcpkm;
+                    pos2km = p;
+                    flagkm = MatchDirection::MatchLeft;
+                }
             }
             p -= 1;
         }
+        maxp = lcpk.left_match[i].to_usize().unwrap() - p;
     }
     if lcpk.right_match[i] > T::zero() && pos1 < gst.second_eos {
-        p = lcpk.right_match[i].to_usize().unwrap();
+        let mut p = lcpk.right_match[i].to_usize().unwrap();
         while gst.glcp[p] >= lcpk.match_length[i] && p < gst.second_eos {
             if gst.gsa.sarray[p].to_usize().unwrap() < gst.first_eos {
-                lcp = forward_match(gst.concat_txt,
+                let (lcp, lcpkm) = forward_match(gst.concat_txt,
                                     (gst.gsa.sarray[p] +
                                         lcpk.match_length[i]).to_usize().unwrap(),
                                     pos1,
@@ -288,11 +337,17 @@ pub fn match_with_first<T>(args: & RunArgs, gst: & GST<T>,
                     pos2 = p;
                     flag = MatchDirection::MatchRight;
                 }
+                if lcpkm > maxlkm {
+                    maxlkm = lcpkm;
+                    pos2km = p;
+                    flagkm = MatchDirection::MatchRight;
+                }
             }
             p += 1;
         }
+        maxp = std::cmp::max(maxp, p - lcpk.right_match[i].to_usize().unwrap());
     }
-    (flag, pos2, maxl)
+    (flag, pos2, maxl, flagkm, pos2km, maxlkm, maxp)
 }
 
 pub fn compute_lcpk_kmacs<T>(args: & RunArgs, gst: & GST<T>, lcpk: &mut LCPK<T>) -> Vec<T>
@@ -307,18 +362,24 @@ where
     assert!(lcpk.right_match.len() == gst.concat_txt.len());
 
     let mut max_match_kmacs: Vec<T> = vec![T::zero(); gst.gsa.sarray.len()];
+    let mut loop_maxp = 0;
 
-    for i in 0..(gst.gsa.sarray.len()) {
+    for i in 2..(gst.gsa.sarray.len()) {
         lcpk.lcpk_length[i] = lcpk.match_length[i];
+        if lcpk.match_length[i] == T::zero() {
+            continue;
+        }
+        let gpos = gst.gsa.sarray[i].to_usize().unwrap();
 
 		// forward matching char by char
-		let (flag, pos2, maxl) = if gst.gsa.sarray[i].to_usize().unwrap() < gst.first_eos {
-            match_with_second(args, gst, lcpk, i)
-		} else if gst.gsa.sarray[i].to_usize().unwrap() > gst.first_eos {
-            match_with_first(args, gst, lcpk, i)
-		} else {
-            (MatchDirection::MatchNone, 0, 0)
-        };
+        assert!(gpos != gst.first_eos && gpos != gst.second_eos);
+		let (flag, pos2, maxl,
+             flagkm, pos2km, maxlkm, maxp) =
+            if gpos < gst.first_eos {
+                match_with_second(args, gst, lcpk, i)
+            } else {
+                match_with_first(args, gst, lcpk, i)
+            };
     
         if flag == MatchDirection::MatchLeft {
             lcpk.left_match[i] = T::from_usize(pos2).unwrap();
@@ -329,8 +390,58 @@ where
             lcpk.right_match[i] = T::from_usize(pos2).unwrap();
         }
         lcpk.lcpk_length[i] = lcpk.match_length[i] + T::from_usize(maxl).unwrap();
+        loop_maxp = std::cmp::max(loop_maxp, maxp);
 
+        if gpos > 1 && gpos != gst.first_eos + 1 && gpos != gst.second_eos + 1  {
+            let pgpos = gpos - 1;
+            let pgidx = gst.gisa[pgpos].to_usize().unwrap();
+            if pgidx > 2 && pgidx <  gst.concat_txt.len() &&
+                 lcpk.match_length[pgidx] == T::zero() {
+                if flagkm == MatchDirection::MatchLeft {
+                    lcpk.left_match[pgidx] = T::from_usize(pos2km).unwrap();
+                    lcpk.right_match[pgidx] = T::zero();
+                }
+                else if flag == MatchDirection::MatchRight {
+                    lcpk.left_match[pgidx] = T::zero();
+                    lcpk.right_match[pgidx] = T::from_usize(pos2km).unwrap();
+                }
+                lcpk.lcpk_length[pgidx] = lcpk.match_length[pgidx] + T::from_usize(maxlkm).unwrap();
+            }   
+        }
     }
+    println!("Loop maxp {}", loop_maxp);
+
+    for i in (0..gst.gsa.sarray.len()).rev(){
+        if i == gst.first_eos || i == gst.second_eos {
+            continue;
+        }
+        let x = gst.gisa[i].to_usize().unwrap();
+        if i+1 == gst.first_eos || i+1 == gst.second_eos {
+            // TODO
+            continue;
+        }
+        assert!(x >= 2);
+        if lcpk.match_length[x] == T::zero() && lcpk.left_match[i] == T::zero() &&
+             lcpk.left_match[x] == lcpk.right_match[x] {
+            let y = gst.gisa[i + 1].to_usize().unwrap();
+            if lcpk.left_match[y] != T::zero() {
+                let (ml, _a) = forward_match(gst.concat_txt, i+1,
+                                       lcpk.left_match[y].to_usize().unwrap() +1, 
+                                        gst.first_eos, 
+                                        gst.second_eos, args.k - 1);
+                lcpk.match_length[x] = T::from_usize(ml).unwrap();
+                lcpk.left_match[x] = T::from_usize(y).unwrap();
+            } else if lcpk.right_match[y] != T::zero(){
+                let (ml, _a) = forward_match(gst.concat_txt, i+1, 
+                                        lcpk.right_match[y].to_usize().unwrap()+1, 
+                                        gst.first_eos, 
+                                        gst.second_eos, args.k - 1);
+                lcpk.match_length[x] = T::from_usize(ml).unwrap();
+                lcpk.right_match[x] = T::from_usize(y).unwrap();
+            }
+        }
+    }
+
 	for i in 0..gst.concat_txt.len() {
 		if lcpk.left_match[i] < lcpk.right_match[i] {
 			max_match_kmacs[i] = lcpk.right_match[i];
@@ -427,12 +538,15 @@ where
 	}
 	// to verify phase 1 of adyar algorithm
 	// verify_acsk(gst, &lcpk.lcpk_length, &max_match_adyar, args.k);
+    print!("1");
+
+    #[cfg(debug_assertions)]
     println!( "ACSK PHASE 1 {}", compute_distance(gst, &lcpk));
     //return 0.0;
 
     // Phase 2:
 	// modify sk-array so that sk[i] = x implies sk[i+1] >= x-1
-	for i in 1..n {
+	for i in 2..n {
         let skidx = gst.gisa[gst.gsa.sarray[i].to_usize().unwrap() + 1].to_usize().unwrap();
 		if lcpk.lcpk_length[i] > lcpk.lcpk_length[skidx] {
 			lcpk.lcpk_length[skidx] = lcpk.lcpk_length[i] - T::one();
@@ -443,6 +557,7 @@ where
 		}
 	}
 
+    print!("2");
     max_match_adyar
 }
 
@@ -490,19 +605,30 @@ pub fn compute_acsk<T>(args: & RunArgs, gst: & GST<T>, lcpk: &mut LCPK<T>) -> f6
 	// lcpk based on k-macs's heuristic
 	// to calculate and print acsk based in k-macs
 	let max_match_kmacs: Vec<T> = compute_lcpk_kmacs(args, gst, lcpk);
-    println!("ACSK KMACS COMPLETE");
-    println!( "ACSK KMACS {}", compute_distance(gst, &lcpk));
+    
+    print!("K"); // indicate kmacs part is done
+
 
 	// to verify k-macs algorithm
 	//verify_acsk(gst, &lcpk.lcpk_length, &max_match, args.k);
+    #[cfg(debug_assertions)]
     let _acs_kmacs = compute_distance(gst, &lcpk);
+
+    #[cfg(debug_assertions)]
+    println!( "ACSK KMACS {}", compute_distance(gst, &lcpk));
 
     // run adyar algorithm using kmacs inputs
     let _max_match_adyar = compute_lcpk_adyar(args, gst, lcpk, &max_match_kmacs);
 
 	// to verify adyar algorithm
 	// verify_acsk(gst, &lcpk.lcpk_length, &_max_match_adyar, args.k);
-    compute_distance(gst, &lcpk)
+    let rdist = compute_distance(gst, &lcpk);
+
+    print!("C");
+    #[cfg(debug_assertions)]
+    println!( "ACSK ADYAR {}", rdist);
+
+    rdist
 }
 
 
@@ -574,6 +700,48 @@ pub fn write_output(args: &RunArgs, titles: &Vec<String>,
     Ok(())
 }
 
+pub fn adyar_pairwise_acsk(rargs: &RunArgs, seqx: & [u8], seqy: & [u8]) -> f64 {
+    let mut tvec: Vec<u8> = seqx.to_vec();
+    let eos_first = tvec.len();
+    tvec.push(FIRST_DELIMITER_U8);
+    let mut yvec: Vec<u8> = seqy.to_vec();
+    tvec.append(&mut yvec);
+    let eos_second = tvec.len();
+    tvec.push(SECOND_DELIMITER_U8);
+    let gsa = sufsort::SA::<i32>::new(&tvec);
+    let gisa = sufsort::construct_isa(&gsa.sarray);
+    let glcp = lcp::construct_lcp_from_sa(gsa.txt, &gsa.sarray, &gisa);
+    let grmq = if rargs.use_rmq {
+            Some(rmq::RMQ::<i32, usize>::new(&glcp))
+        } else {
+            None
+        };
+
+    #[cfg(debug_assertions)]
+    small_hist(&glcp);
+
+    #[cfg(debug_assertions)]
+    println!("Construction Complete {}", tvec.len());
+
+    let gst = GST::<i32> {    
+        first_seq: &seqx, second_seq: &seqy, concat_txt: &tvec,
+        first_eos: eos_first, second_eos: eos_second,
+        gsa: &gsa, gisa: &gisa, glcp: &glcp, grmq: &grmq
+    };
+
+    // println!("First Len {}, Second Len {}, First EOS {}, Second EOS {}", 
+    //             gst.first_seq.len(), gst.second_seq.len(),
+    //             gst.first_eos, gst.second_eos);
+
+    let mut lcpk = find_exact_matches(&gst);
+
+    #[cfg(debug_assertions)]
+    small_hist(&lcpk.match_length);
+
+    let acsk = compute_acsk(&rargs, &gst, &mut lcpk);
+    acsk
+}
+
 
 fn run_adyar(rargs: RunArgs) -> std::io::Result<()> {
 
@@ -590,41 +758,18 @@ fn run_adyar(rargs: RunArgs) -> std::io::Result<()> {
         let seqx = rcds[x].seq();
         for y in (x+1)..nseq {
             let seqy = rcds[y].seq();
-            let mut tvec: Vec<u8> = seqx.to_vec();
-            let eos_first = tvec.len();
-            tvec.push(FIRST_DELIMITER_U8);
-            tvec.append(&mut seqy.to_vec());
-            let eos_second = tvec.len();
-            tvec.push(SECOND_DELIMITER_U8);
             // let tlen = tvec.len();
 
-            let gsa = sufsort::SA::<i32>::new(&tvec);
-            let gisa = sufsort::construct_isa(&gsa.sarray);
-            let glcp = lcp::construct_lcp_from_sa(gsa.txt, &gsa.sarray, &gisa);
-            //let grmq = rmq::RMQ::<i32, usize>::new(&glcp);
-            println!("Construction Complete");
-
-            let gst: GST<i32> = GST::<i32> {    
-                first_seq: &seqx, second_seq: &seqy, concat_txt: &tvec,
-                first_eos: eos_first, second_eos: eos_second,
-                gsa: &gsa, gisa: &gisa, glcp: &glcp, grmq: None // &grmq
-            };
-
-            // println!("First Len {}, Second Len {}, First EOS {}, Second EOS {}", 
-            //             gst.first_seq.len(), gst.second_seq.len(),
-            //             gst.first_eos, gst.second_eos);
-
-            let mut lcpk = find_exact_matches(&gst);
-            println!("Matches Complete");
-            let acsk = compute_acsk(&rargs, &gst, &mut lcpk);
-
-            println!("{}", acsk);
+            let acsk = adyar_pairwise_acsk(&rargs, seqx, seqy);
+            //println!("{}", acsk);
 
             pairwise_dcs[vidx] = acsk;
             vidx += 1;
         }
     // }
     }
+
+    println!("D");
     println!("Runtime for computing ACSK {} ms", now.elapsed().as_millis());
     let mut titles: Vec<String> = Vec::with_capacity(nseq);
     for x in 0..nseq {
@@ -668,18 +813,24 @@ fn main() -> std::io::Result<()> {
                                .validator(is_writable)
                                .help("No. of Mismatches")
                                .takes_value(true))
+                            .arg(Arg::with_name("r")
+                               .short("r")
+                               .long("use_rmq")
+                               .help("Indicator to user rmq or not")
+                               .takes_value(false))
                           .get_matches();
 
     
     let rargs: RunArgs = RunArgs {
         file_name: String::from(matches.value_of("INPUT").unwrap()),
         k: matches.value_of("mismatches").unwrap().parse::<usize>().unwrap(),
-        out_file: String::from(matches.value_of("out_file").unwrap())
+        out_file: String::from(matches.value_of("out_file").unwrap()),
+        use_rmq: matches.occurrences_of("r") > 0,
     };
-    println!("Using input args: INPUT = {}, K = {}, Output = {} ", rargs.file_name,
-                 rargs.k, rargs.out_file);
+    println!("Using input args: INPUT = {}, K = {}, Output = {}, Use RMQ {} ", rargs.file_name,
+                 rargs.k, rargs.out_file, rargs.use_rmq);
     let tnow = std::time::Instant::now();
     run_adyar(rargs)?;
-    println!("Total run time inc. IO {} ms", tnow.elapsed().as_millis());
+    println!("Total run time w. IO {} ms", tnow.elapsed().as_millis());
     Ok(())
 }

@@ -25,6 +25,7 @@ pub struct RunArgs {
     pub file_name: String,
     pub out_file: String,
     pub use_rmq: bool,
+    pub show_progress: bool,
 }
 
 pub struct GST<'s, T> where 
@@ -409,7 +410,7 @@ where
             }   
         }
     }
-    println!("Loop maxp {}", loop_maxp);
+    // println!("Loop maxp {}", loop_maxp);
 
     for i in (0..gst.gsa.sarray.len()).rev(){
         if i == gst.first_eos || i == gst.second_eos {
@@ -538,7 +539,9 @@ where
 	}
 	// to verify phase 1 of adyar algorithm
 	// verify_acsk(gst, &lcpk.lcpk_length, &max_match_adyar, args.k);
-    print!("1");
+    if args.show_progress == true {
+        print!("1");
+    }
 
     #[cfg(debug_assertions)]
     println!( "ACSK PHASE 1 {}", compute_distance(gst, &lcpk));
@@ -557,7 +560,9 @@ where
 		}
 	}
 
-    print!("2");
+    if args.show_progress == true {
+        print!("2");
+    }
     max_match_adyar
 }
 
@@ -606,7 +611,9 @@ pub fn compute_acsk<T>(args: & RunArgs, gst: & GST<T>, lcpk: &mut LCPK<T>) -> f6
 	// to calculate and print acsk based in k-macs
 	let max_match_kmacs: Vec<T> = compute_lcpk_kmacs(args, gst, lcpk);
     
-    print!("K"); // indicate kmacs part is done
+    if args.show_progress == true {
+        print!("K"); // indicate kmacs part is done
+    }
 
 
 	// to verify k-macs algorithm
@@ -624,7 +631,9 @@ pub fn compute_acsk<T>(args: & RunArgs, gst: & GST<T>, lcpk: &mut LCPK<T>) -> f6
 	// verify_acsk(gst, &lcpk.lcpk_length, &_max_match_adyar, args.k);
     let rdist = compute_distance(gst, &lcpk);
 
-    print!("C");
+    if args.show_progress == true {
+        print!("C");
+    }
     #[cfg(debug_assertions)]
     println!( "ACSK ADYAR {}", rdist);
 
@@ -769,7 +778,9 @@ fn run_adyar(rargs: RunArgs) -> std::io::Result<()> {
     // }
     }
 
-    println!("D");
+    if rargs.show_progress == true {
+        println!("D");
+    }
     println!("Runtime for computing ACSK {} ms", now.elapsed().as_millis());
     let mut titles: Vec<String> = Vec::with_capacity(nseq);
     for x in 0..nseq {
@@ -818,6 +829,11 @@ fn main() -> std::io::Result<()> {
                                .long("use_rmq")
                                .help("Indicator to user rmq or not")
                                .takes_value(false))
+                            .arg(Arg::with_name("p")
+                               .short("p")
+                               .long("show_progress")
+                               .help("Indicator to show progress")
+                               .takes_value(false))
                           .get_matches();
 
     
@@ -826,6 +842,7 @@ fn main() -> std::io::Result<()> {
         k: matches.value_of("mismatches").unwrap().parse::<usize>().unwrap(),
         out_file: String::from(matches.value_of("out_file").unwrap()),
         use_rmq: matches.occurrences_of("r") > 0,
+        show_progress: matches.occurrences_of("p") > 0,
     };
     println!("Using input args: INPUT = {}, K = {}, Output = {}, Use RMQ {} ", rargs.file_name,
                  rargs.k, rargs.out_file, rargs.use_rmq);
